@@ -10,7 +10,8 @@ CSAPP 的 Shell Lab 让你实现一个简单的 Unix shell，支持前后台进�
 
 这个实验的**核心 insight** 是：
 
-**Shell 不是什么神秘的东西，它就是一个程序。** 读取用户输入，解析命令，fork 一个子进程，exec 执行程序，等待子进程结束。就这么简单。
+**Shell 不是什么神秘的东西，它就是一个程序。** 读取用户输入，解析命令，fork
+一个子进程，exec 执行程序，等待子进程结束。就这么简单。
 
 ## 最简单的 shell
 
@@ -67,7 +68,8 @@ Signal(SIGINT, SIG_IGN);
 
 ### 思路
 
-Shell 本身不应该被 Ctrl-C 终止——它应该终止前台子进程，然后继续等待输入。所以 shell 忽略 SIGINT，让子进程自己处理。
+Shell 本身不应该被 Ctrl-C 终止——它应该终止前台子进程，然后继续等待输入。所以 shell 忽略
+SIGINT，让子进程自己处理。
 
 ## 作业控制：前后台切换
 
@@ -86,7 +88,8 @@ void builtin_cmd(char **argv) {
 
 ### 思路
 
-Shell 维护一个作业列表，记录每个作业的 PID、状态（运行中/停止/完成）。`SIGCHLD` 信号通知 shell 子进程状态变化，shell 在信号处理函数中更新作业列表。
+Shell 维护一个作业列表，记录每个作业的 PID、状态（运行中/停止/完成）。`SIGCHLD` 信号通知
+shell 子进程状态变化，shell 在信号处理函数中更新作业列表。
 
 ## Zig 实现的差异
 
@@ -112,7 +115,8 @@ fn eval(cmdline: []const u8) void {
 }
 ```
 
-Zig 的 `posix.fork()` 和 `posix.execveZ()` 直接暴露系统调用，没有 C 的 `fork()`/`exec()` 的包装。你看到的就是你得到的。
+Zig 的 `posix.fork()` 和 `posix.execveZ()` 直接暴露系统调用，没有 C 的 `fork()`/`exec()`
+的包装。你看到的就是你得到的。
 
 ## 本实验的 takeaway
 
@@ -121,4 +125,5 @@ Zig 的 `posix.fork()` 和 `posix.execveZ()` 直接暴露系统调用，没有 C
 3. 作业控制维护一个作业列表，用 SIGCHLD 跟踪子进程状态
 4. 理解 shell，你就理解了进程管理、信号、I/O 重定向的全部
 
-**核心 insight：Shell 不是魔法，它就是一个普通的程序，用操作系统提供的 API（fork、exec、wait、signal）实现了进程管理。**
+**核心 insight：Shell 不是魔法，它就是一个普通的程序，用操作系统提供的
+API（fork、exec、wait、signal）实现了进程管理。**

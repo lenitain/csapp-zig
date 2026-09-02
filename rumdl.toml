@@ -1,0 +1,4 @@
+[MD013]
+line-length = 91
+reflow = true
+code-blocks = false

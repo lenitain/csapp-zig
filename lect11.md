@@ -2,9 +2,11 @@
 
 ## 网络也是文件
 
-Unix 的"一切皆文件"哲学延伸到了网络。网络连接通过**套接字** (socket) 表示，套接字也是一个文件描述符。你用 `read()`/`write()` 收发数据，就像读写文件一样。
+Unix 的"一切皆文件"哲学延伸到了网络。网络连接通过**套接字** (socket)
+表示，套接字也是一个文件描述符。你用 `read()`/`write()` 收发数据，就像读写文件一样。
 
-这是 CSAPP 第十一章的核心 insight：**网络编程不是什么神秘的东西，它只是 I/O 的一种特殊形式。**
+这是 CSAPP 第十一章的核心
+insight：**网络编程不是什么神秘的东西，它只是 I/O 的一种特殊形式。**
 
 ## 客户端-服务器模型
 
@@ -13,7 +15,7 @@ Unix 的"一切皆文件"哲学延伸到了网络。网络连接通过**套接�
 - **服务器**：等待连接，提供服务
 - **客户端**：主动连接服务器，请求服务
 
-```
+```text
 客户端                    服务器
    |                        |
    |--- 连接请求 ---------->|
@@ -65,7 +67,8 @@ socklen_t client_len = sizeof(client_addr);
 int connfd = accept(sockfd, (struct sockaddr *)&client_addr, &client_len);
 ```
 
-`accept()` 从等待队列中取出一个连接，返回一个新的文件描述符。这个新的文件描述符用于和客户端通信。
+`accept()`
+从等待队列中取出一个连接，返回一个新的文件描述符。这个新的文件描述符用于和客户端通信。
 
 ### 连接服务器（客户端）
 
@@ -108,7 +111,8 @@ struct sockaddr_in addr;
 bind(sockfd, (struct sockaddr *)&addr, sizeof(addr));
 ```
 
-C 的 socket API 用 `struct sockaddr *` 作为通用类型，实际传入的是 `struct sockaddr_in` 或 `struct sockaddr_in6`。这种强制转换绕过了类型系统。
+C 的 socket API 用 `struct sockaddr *` 作为通用类型，实际传入的是 `struct sockaddr_in` 或
+`struct sockaddr_in6`。这种强制转换绕过了类型系统。
 
 ### 大小端转换容易忘
 
@@ -116,7 +120,8 @@ C 的 socket API 用 `struct sockaddr *` 作为通用类型，实际传入的是
 addr.sin_port = htons(8080); // 主机字节序转网络字节序
 ```
 
-网络协议用大端字节序 (big-endian)，x86 用小端字节序 (little-endian)。你必须用 `htons()`/`htonl()` 转换。如果忘了，端口号会被错误解释。
+网络协议用大端字节序 (big-endian)，x86 用小端字节序 (little-endian)。你必须用
+`htons()`/`htonl()` 转换。如果忘了，端口号会被错误解释。
 
 ### IPv4 和 IPv6 不兼容
 
@@ -150,6 +155,7 @@ try writer.print("HTTP/1.1 200 OK\r\n\r\nHello\n", .{});
 ```
 
 Zig 的 `std.net` 提供了类型安全的 socket API：
+
 - `net.Address` 统一了 IPv4 和 IPv6
 - 字节序转换由库处理
 - 没有强制类型转换
@@ -160,7 +166,7 @@ HTTP (HyperText Transfer Protocol) 是 Web 的基础。它建立在 TCP 之上�
 
 ### HTTP 请求
 
-```
+```text
 GET /index.html HTTP/1.1
 Host: www.example.com
 Connection: close
@@ -168,7 +174,7 @@ Connection: close
 
 ### HTTP 响应
 
-```
+```text
 HTTP/1.1 200 OK
 Content-Type: text/html
 Content-Length: 13
@@ -176,7 +182,8 @@ Content-Length: 13
 Hello, World!
 ```
 
-HTTP 的设计体现了 Unix 哲学：**简单、文本、可组合。** 你可以用 `telnet` 或 `curl` 手动发送 HTTP 请求，用 `tcpdump` 抓包查看。
+HTTP 的设计体现了 Unix 哲学：**简单、文本、可组合。** 你可以用 `telnet` 或 `curl` 手动发送
+HTTP 请求，用 `tcpdump` 抓包查看。
 
 ### 简单的 HTTP 服务器
 
@@ -228,6 +235,7 @@ ssize_t n = read(fd, buf, sizeof(buf));
 ### 并发处理
 
 服务器需要同时处理多个客户端。选择：
+
 - 多进程/多线程：每个连接一个进程/线程
 - I/O 多路复用：一个线程处理多个连接
 - 异步 I/O：事件驱动
@@ -248,4 +256,5 @@ ssize_t n = read(fd, buf, sizeof(buf));
 
 ## 下一讲
 
-网络让程序可以和远程的程序通信。但本地的程序之间也需要通信——下一讲看并发编程，以及为什么"共享内存"既是并发的基础，也是并发 bug 的根源。
+网络让程序可以和远程的程序通信。但本地的程序之间也需要通信——下一讲看并发编程，以及为什么"共享内存"既是并发的基础，也是并发
+bug 的根源。
