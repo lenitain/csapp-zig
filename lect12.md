@@ -1,356 +1,225 @@
 # CSAPP 第十二讲：并发编程
 
-## 为什么需要并发？
+## 物理原理：多核 + cache 一致性
 
-程序需要并发的原因有两个：
+**为啥需要并发？** 两个原因：
 
-1. **I/O 等待**：程序在等待磁盘或网络时，CPU 闲着。如果有多个任务，可以让它们交替执行。
-2. **多核利用**：现代 CPU 有多个核心，串行程序只能用一个核心。并发程序可以利用所有核心。
+1. **I/O 等待**：程序等磁盘/网络时，CPU 闲着
+2. **多核利用**：现代 CPU 多核，串行程序只能用一个核心
 
-并发 (concurrency) 和并行 (parallelism) 是不同的概念：
+**并发 vs 并行**：
 
-- **并发**：逻辑上的"同时执行"，可以由操作系统模拟（上下文切换）
-- **并行**：物理上的"同时执行"，需要多个处理器核心
+- **并发**：逻辑上同时（context switch）
+- **并行**：物理上同时（多 CPU 核心）
 
-## 三种并发模型
+现代 CPU 多核 + 超标量 + 乱序，硬件并行能力是**物理存在**——你不利用就浪费。
 
-### 1. 多进程
+### 共享内存 + cache 一致性
 
-每个进程有独立的地址空间，通过 IPC（管道、共享内存、消息队列）通信。
+线程共享进程的地址空间：
 
-优点：进程隔离，一个进程崩溃不影响其他进程。缺点：进程创建和切换开销大，IPC 复杂。
-
-```c
-pid_t pid = fork();
-if (pid == 0) {
-    // 子进程处理一个任务
-    handle_request(request);
-    exit(0);
-} else {
-    // 父进程继续接受新请求
-}
+```
+代码段    (共享)
+堆        (共享)
+线程 A 栈 (私有)
+线程 B 栈 (私有)
 ```
 
-### 2. 多线程
+**关键事实**：多核各自有 L1/L2 cache。如果 core A 修改 `x`，core B 的 cache 还是旧值。
+**MESI 协议** 同步 core 之间的 cache——写时 invalidate，读时 check invalid。
 
-线程共享地址空间，通过共享内存通信。
+**伪共享** (false sharing)：两个不相关的变量在同一个 cache line 里，core A 写一个，core B 写另一个
+——它们互相把对方的 cache line 弄无效。性能暴跌。
 
-优点：线程创建和切换开销小，共享内存通信简单。缺点：共享内存意味着一个线程的 bug
-可能影响其他线程。
+## C 的设计选择：pthread 没有 RAII，数据竞争是 UB
 
-```c
-pthread_t thread;
-pthread_create(&thread, NULL, worker, &arg);
-pthread_join(thread, NULL);
-```
-
-### 3. I/O 多路复用
-
-一个线程同时监视多个文件描述符，哪个就绪就处理哪个。
-
-优点：单线程，没有竞态条件。缺点：编程模型复杂（回调地狱）。
-
-```c
-fd_set readfds;
-FD_ZERO(&readfds);
-FD_SET(fd1, &readfds);
-FD_SET(fd2, &readfds);
-select(maxfd + 1, &readfds, NULL, NULL, NULL);
-```
-
-## 线程的内存模型
-
-线程共享进程的地址空间。这意味着：
-
-- 全局变量：所有线程共享
-- 堆内存：所有线程共享（malloc 的内存）
-- 栈：每个线程有自己的栈
-- 寄存器：每个线程有自己的寄存器状态
-
-```text
-进程地址空间：
-+------------------+
-| 代码段 (共享)     |
-+------------------+
-| 数据段 (共享)     |
-+------------------+
-| 堆 (共享)         |
-+------------------+
-| ...              |
-+------------------+
-| 线程 A 的栈       |
-+------------------+
-| 线程 B 的栈       |
-+------------------+
-```
-
-## 竞态条件：并发的核心问题
+### 数据竞争是 UB
 
 ```c
 // 两个线程同时执行
-counter++; // 看起来是一条语句，实际上是三步：
-           // 1. 读取 counter 到寄存器
-           // 2. 寄存器加 1
-           // 3. 写回 counter
+counter++;  // 三步：读、加、写
+            // 如果两个线程同时执行，结果可能少加一次
 ```
 
-如果两个线程同时执行这三步，结果可能少加一次。这就是**竞态条件** (race condition)。
+**数据竞争**：多线程同时访问同一位置，至少一个写，无同步。在 C/C++ 里是 UB。
 
-竞态条件的根源：**多个线程同时访问共享数据，且至少有一个是写操作。**
+`counter++` 不是原子的——编译器**假设不会发生数据竞争**，优化可能让事情更糟。
 
-### 数据竞争 vs 竞态条件
-
-- **数据竞争** (data race)：多个线程同时访问同一内存位置，且至少有一个是写操作，且没有同步
-- **竞态条件** (race condition)：程序的结果取决于线程的执行顺序
-
-数据竞争是未定义行为（在 C 和 C++ 中）。竞态条件是逻辑错误。
-
-## 互斥锁：保护共享数据
-
-解决方案：**互斥锁** (mutex)。在访问共享变量前加锁，访问完解锁。
-
-```c
-pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-int counter = 0;
-
-void *worker(void *arg) {
-    for (int i = 0; i < 1000000; i++) {
-        pthread_mutex_lock(&mutex);
-        counter++;
-        pthread_mutex_unlock(&mutex);
-    }
-    return NULL;
-}
-```
-
-### C 的互斥锁没有作用域
+### pthread 无 RAII
 
 ```c
 void critical_section() {
     pthread_mutex_lock(&mutex);
-    // ... 临界区 ...
     if (error) {
-        return;  // 忘了 unlock，死锁！
+        return;  // 忘了 unlock——死锁
     }
     pthread_mutex_unlock(&mutex);
 }
 ```
 
-C 的 `pthread_mutex_lock/unlock` 没有 RAII 机制。如果临界区中间有 return，你必须记得在每个
-return 前 unlock。这和 malloc/free 的问题一样——手动管理容易出错。
+C 的 mutex **没有作用域绑定**——你必须在每个 return 前 unlock。这件事跟 malloc/free
+的问题是同一个——手动管理容易出错。
 
-### Zig 的态度：defer 解决一切
-
-```zig
-var mutex = std.Thread.Mutex{};
-var counter: u32 = 0;
-
-fn worker() void {
-    var i: u32 = 0;
-    while (i < 1000000) : (i += 1) {
-        mutex.lock();
-        defer mutex.unlock(); // 作用域结束时自动解锁
-        counter += 1;
-    }
-}
-```
-
-`defer` 让锁的释放和作用域绑定，不需要手动管理。这和内存管理的 `defer` 是同一个模式——Zig 用
-`defer` 统一了所有资源清理。
-
-```zig
-// 即使有多个 return 路径，defer 也能正确清理
-fn complexFunction() void {
-    mutex.lock();
-    defer mutex.unlock();
-
-    if (condition1) return; // defer 自动解锁
-    if (condition2) return; // defer 自动解锁
-    // ... 临界区 ...
-}
-```
-
-## 条件变量：线程间的通信
-
-互斥锁只解决了"互斥"问题。有时候线程需要"等待某个条件成立"：
+### `void*` 参数类型擦除
 
 ```c
-// 生产者-消费者模型
-pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
-int buffer = 0;
-int ready = 0;
-
-// 生产者
-void producer() {
-    pthread_mutex_lock(&mutex);
-    buffer = 42;
-    ready = 1;
-    pthread_cond_signal(&cond);  // 通知消费者
-    pthread_mutex_unlock(&mutex);
-}
-
-// 消费者
-void consumer() {
-    pthread_mutex_lock(&mutex);
-    while (!ready) {
-        pthread_cond_wait(&cond, &mutex);  // 等待条件
-    }
-    printf("Got: %d\n", buffer);
-    pthread_mutex_unlock(&mutex);
-}
-```
-
-`pthread_cond_wait()` 释放锁，等待信号，然后重新获取锁。这避免了忙等待（busy waiting）。
-
-### Zig 的条件变量
-
-```zig
-var mutex = std.Thread.Mutex{};
-var condition = std.Thread.Condition{};
-var buffer: i32 = 0;
-var ready: bool = false;
-
-fn producer() void {
-    mutex.lock();
-    defer mutex.unlock();
-    buffer = 42;
-    ready = true;
-    condition.signal(); // 通知消费者
-}
-
-fn consumer() void {
-    mutex.lock();
-    defer mutex.unlock();
-    while (!ready) {
-        condition.wait(&mutex); // 等待条件
-    }
-    std.debug.print("Got: {}\n", .{buffer});
-}
-```
-
-## 死锁：并发的另一个陷阱
-
-如果线程 A 持有锁 1 等待锁 2，线程 B 持有锁 2 等待锁 1，两个线程永远等下去。这就是**死锁**
-(deadlock)。
-
-```text
-线程 A: lock(1) → 等待 lock(2)
-线程 B: lock(2) → 等待 lock(1)
-→ 死锁
-```
-
-### 死锁的四个必要条件
-
-1. **互斥**：资源不能同时被多个线程使用
-2. **持有并等待**：线程持有资源，同时等待其他资源
-3. **不可抢占**：已获得的资源不能被强制释放
-4. **循环等待**：存在线程的循环等待链
-
-### 避免死锁
-
-最简单的方法：**所有线程按相同的顺序获取锁。**
-
-```c
-// 总是先锁 1，再锁 2
-pthread_mutex_lock(&mutex1);
-pthread_mutex_lock(&mutex2);
-// ...
-pthread_mutex_unlock(&mutex2);
-pthread_mutex_unlock(&mutex1);
-```
-
-## C 的 pthread：历史包袱
-
-C 语言最初没有线程支持。POSIX 线程 (pthread) 是后来标准化的，API 设计有历史包袱：
-
-```c
-// void* 参数，类型安全完全丧失
 void *worker(void *arg) {
-    int *data = (int *)arg; // 强制转换
+    int *data = (int *)arg;  // 强转
     // ...
     return NULL;
 }
-
-pthread_t thread;
-int arg = 42;
-pthread_create(&thread, NULL, worker, &arg);
+pthread_create(&thread, NULL, worker, &data);
 ```
 
-### Zig 的线程：类型安全
+pthread 的 worker 收 `void*`，调用方要传 `&data`、worker 强转回 `int*`——**类型擦除**，
+编译器不会检查类型匹配。
 
-```zig
-fn worker(data: i32) void {
-    // data 是类型安全的，不需要强制转换
-}
+## 现代视角：defer、Send/Sync、async
 
-const thread = try std.Thread.spawn(.{}, worker, .{42});
-thread.join();
-```
+### defer 让锁的释放是作用域的
 
-Zig 的 `std.Thread.spawn` 接受具体的函数和参数类型，编译器会检查类型匹配。
+```rust
+let mutex = Mutex::new(0);
 
-## 原子操作：比锁更轻量的同步
-
-对于简单的操作（比如递增计数器），互斥锁太重了。原子操作可以在硬件层面保证操作的原子性，不需要锁。
-
-```c
-#include <stdatomic.h>
-atomic_int counter = 0;
-
-void *worker(void *arg) {
-    for (int i = 0; i < 1000000; i++) {
-        atomic_fetch_add(&counter, 1); // 原子递增
-    }
-    return NULL;
+{
+    let mut guard = mutex.lock().unwrap();  // 锁
+    // 临界区
+    *guard += 1;
+    // guard 离开作用域自动 unlock
 }
 ```
 
-### Zig 的原子操作
+`MutexGuard` 实现 `Drop`，离开作用域自动 unlock。**Rust 编译器静态证明没有"忘 unlock"**。
 
-```zig
-var counter: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+C 的 pthread mutex **没有 RAII**——你必须在每个 return 前 unlock。**这件事是 C 抽象机制的
+原理问题**——资源管理不是类型层可见的。
 
-fn worker() void {
-    var i: u32 = 0;
-    while (i < 1000000) : (i += 1) {
-        _ = counter.fetchAdd(1, .seq_cst); // 原子递增
-    }
+### Send/Sync 是类型的一部分
+
+```rust
+fn spawn<T: Send>(t: T) { ... }   // T 必须能跨线程
+fn share<T: Sync>(t: &T) { ... } // T 必须能跨线程共享
+```
+
+Rust 的 `Send`/`Sync` 是**自动派生的 trait**——如果你没实现，编译器会报错。
+
+```rust
+let rc = std::rc::Rc::new(5);  // Rc 不是 Send
+std::thread::spawn(move || {
+    println!("{}", rc);  // 编译错误！Rc 不能跨线程
+});
+```
+
+**这件事是 C 抽象做不到的**——`Rc*` 在 C 里就是指针类型，能不能跨线程是程序员记的事。
+Rust 让"能否跨线程"成为**类型系统**的事。
+
+### async 把并发从线程中分离
+
+```rust
+async fn handle_client(socket: TcpStream) {
+    let mut buf = [0; 1024];
+    socket.read(&mut buf).await.unwrap();
+    // ...
 }
 ```
+
+async fn 返回 `Future`——**不是立即执行，是可以被 runtime 挂起/恢复**。10000 并发连接 =
+10000 个 Future = 1 个 OS thread = 1 个 stack frame。
+
+**这是物理能力的现代利用**——OS 提供 epoll/kqueue，async runtime 调度 Future 状态机，
+你不用手写状态机。
+
+### Atomic 操作代替锁
+
+```rust
+use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+COUNTER.fetch_add(1, Ordering::Relaxed);
+```
+
+对于简单操作，atomic 比 mutex 快——**atomic 是硬件支持的不可中断操作**（CAS 指令）。
+
+## AI 时代怎么验证
+
+**1. 让 AI 跑 ThreadSanitizer 找数据竞争**
+
+```bash
+$ clang -fsanitize=thread t.c
+$ ./your_program
+```
+
+让 LLM 解释：哪些指令是竞争的？竞争的两个线程调用栈是什么？什么同步原语能解决？
+
+**2. 让 AI 跑 perf c2c 看 false sharing**
+
+```bash
+$ perf c2c record ./your_program
+$ perf c2c report
+```
+
+让 LLM 解释：哪些地址是 false sharing？每个地址的 contention 结构是什么？怎么 padding 解决？
+
+**3. 让 AI 解释 MESI 状态机**
+
+```bash
+# 让 AI 画 MESI 状态机，解释每个状态转换的触发事件
+```
+
+让 LLM 解释：什么时候 M→E，什么时候 E→M？写 invalidation 怎么广播？
+
+**5. 让 AI 对比 pthread 和 tokio**
+
+```bash
+# 10000 并发 echo server：
+# - pthread 10000 线程
+# - tokio 1 线程 + 10000 Future
+```
+
+让 LLM 解释：tokio 为什么内存占用低？Future 是怎么存根的？awake 是怎么恢复的？
+
+**6. 让 AI 找死锁**
+
+```bash
+# 写一个 pthread 互锁程序，让 AI 分析
+```
+
+让 LLM 解释：哪些线程锁了哪些锁？等待链是什么？怎么打破死锁？
 
 ## 本讲要点
 
-1. 并发有三种模型：多进程、多线程、I/O 多路复用
-2. 竞态条件是并发的核心问题：多个线程同时访问共享数据
-3. 互斥锁保护共享数据，但 C 的 pthread 没有 RAII，手动管理容易出错
-4. Zig 的 defer 让锁的释放和作用域绑定，更安全
-5. 条件变量让线程可以等待条件成立，避免忙等待
-6. 死锁是并发的另一个陷阱，避免方法是按固定顺序获取锁
-7. 原子操作比锁更轻量，适合简单的操作
+1. 多核 + cache 一致性是硬件物理能力——不利用就浪费
+2. 数据竞争是 C 的 ABI 定义，编译器信任你不发生竞争——发生了是 UB
+3. pthread 没有 RAII，C 的 mutex 释放是程序员记的事
+4. Rust 的 Send/Sync 让"能否跨线程"成为类型系统的事
+5. async runtime 把"状态机"从程序员手里抢过来——不用手写 Future
+6. AI 时代 perf c2c、ThreadSanitizer 是 debug 并发的必备工具
 
 ## 总结
 
-这十二讲覆盖了 CSAPP
-的全部内容：数据表示、汇编、处理器体系结构、程序优化、内存层级、链接、异常控制流、虚拟内存、系统级
-I/O、网络编程、并发编程。
+这十二讲覆盖了 CSAPP 的全部内容：**数据表示、汇编、处理器体系结构、程序优化、内存层级、链接、
+异常控制流、虚拟内存、系统级 I/O、网络编程、并发编程。**
 
-每讲我们都对比了 C 和 Zig 的设计选择：
+每一讲我们走了同一个结构：
 
-| 主题 | C 的问题 | Zig 的解决方案 |
-|------|----------|---------------|
-| 数据表示 | 隐式类型转换，UB | 显式转换，确定行为 |
-| 缓冲区溢出 | gets() 不检查边界 | slice 带长度，边界检查 |
-| 编译器优化 | UB 给编译器"合法伤害权" | 没有 UB，行为确定 |
-| 内存管理 | malloc/free 手动管理 | defer + Allocator 接口 |
-| 错误处理 | errno 全局变量 | 错误是类型的一部分 |
-| I/O 缓冲 | 隐藏的内存分配 | 显式缓冲 |
-| 网络编程 | 类型不安全，大小端易忘 | 类型安全，自动处理 |
-| 并发 | pthread 无 RAII | defer 统一资源清理 |
+| 环节 | 你看到什么 |
+|------|------------|
+| 物理原理 | CPU 是数字逻辑、存储有速度差、隔离需要硬件支持 |
+| C 的设计选择 | 历史阶段的工具拼接——`#include`、malloc/free、errno、void* |
+| 现代视角 | 模块系统、defer、Result 类型、Send/Sync 替代 C 的隐藏状态 |
+| AI 验证 | 让 LLM 跑 perf、strace、sanitizer、cachegrind |
 
-这些对比不是为了说"C 不好，Zig
-好"。而是为了让你理解：**C 的设计选择是历史的产物，Zig 的设计选择是对 C 问题的修正。**
-理解这些选择，你才能理解系统是怎么工作的，以及为什么新工具会这样设计。
+**这套结构传达的不是"哪个方法更好"——而是"原理不变，载体在变"。**
 
-系统心智模型不会过时，因为它们是物理现实的反映。AI
-可以写代码，但理解代码背后的系统，是你的不可替代的能力。
+**C 的设计选择是历史的产物**——`#include` 因为 1972 年没有模块系统，`malloc/free` 因为
+1972 年没有时间预算做 GC。理解它们不是要学它们，是为了接触 OS/ABI 这些必读 C 的地方时不被
+绊倒。
+
+**现代工具暴露 C 隐藏的东西**——Rust/Zig 让 UB、隐式分配、生命周期这些成为编译期错误，
+不是为了取代 C，是为了让你看清 C 哪里在"悄悄做事"。
+
+**AI 干脏活，你定方向**——反汇编、跑 trace、生成测试用例、读 stack——这些都丢给 LLM。
+你做的是判断它说的对不对、看它漏了什么 case。
+
+**系统心智模型不会过时**，因为它们是物理现实的反映。AI 可以写代码，但理解代码背后的系统，
+是你的不可替代的能力。

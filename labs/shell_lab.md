@@ -2,35 +2,100 @@
 
 **对应章节：** 第八讲（异常控制流）
 
-**一句话点题：** Shell 就是一个循环：读命令 → fork → exec → 等待。
+**一句话点题：** Shell 不是一个神秘东西。Shell 就是一个循环：读命令 → fork → exec → 等待。
 
-## 为什么要做这个实验
+## 为什么不手写 shell
 
-CSAPP 的 Shell Lab 让你实现一个简单的 Unix shell，支持前后台进程、信号处理、作业控制。
+原 CSAPP Shell Lab 让你实现一个简单的 Unix shell，支持前后台进程、信号处理、作业控制。
 
-这个实验的**核心 insight** 是：
+**AI 时代这件事的价值是"理解"而不是"动手"**——让 LLM 写一个简单 shell 是几分钟的事。**你
+的工作是理解 fork/exec 的时序、信号处理为什么是回调地狱、作业控制的状态机。**
 
-**Shell 不是什么神秘的东西，它就是一个程序。** 读取用户输入，解析命令，fork
-一个子进程，exec 执行程序，等待子进程结束。就这么简单。
+## 核心 insight
 
-## 最简单的 shell
+**Shell 就是一个普通程序。** 它用 OS 提供的 API（fork、exec、wait、signal）实现进程管理。
+
+```
+while (1) {
+    printf("> ");
+    fgets(cmdline, MAXLINE, stdin);
+    eval(cmdline);  // 解析 → fork → exec → wait
+}
+```
+
+核心逻辑：
+
+1. **读**：从 stdin 读命令
+2. **解析**：拆成 argv，判断是否后台（`&` 结尾）
+3. **fork**：创建子进程
+4. **exec**：子进程执行新程序
+5. **wait**：父进程等子进程结束（前台）
+
+## AI 帮你做什么
+
+**1. 让 AI strace 一个 shell**
+
+```bash
+$ strace -f -e trace=clone,execve,wait4 bash -c "ls /tmp"
+```
+
+让 LLM 解释：
+
+- `clone` 系统调用是什么？怎么创建子进程？
+- `execve` 替换地址空间——确认子进程从哪一步开始跑 `ls`
+- `wait4` 怎么等待——子进程 exit status 怎么传回
+
+**2. 让 AI 解释 fork 的写时拷贝 (COW)**
+
+```bash
+$ strace -e trace=clone,mmap bash -c "ls /tmp"
+```
+
+让 LLM 解释：
+
+- fork 后父子进程地址空间怎么共享？
+- 写时拷贝（copy-on-write）在哪一刻发生？
+- 为什么 fork 几乎没成本？
+
+**3. 让 AI 追踪 SIGCHLD**
+
+```bash
+$ strace -e trace=clone,execve,wait4,rt_sigaction bash -c "ls /tmp &"
+```
+
+让 LLM 解释：
+
+- SIGCHLD 在什么时候触发？
+- handler 的执行顺序——什么时候 waitpid 能拿到子进程状态？
+- 为什么信号不能排队（标准信号）
+
+**4. 让 AI 写一个简单 shell 让 AI 调试**
+
+```bash
+# 写一个 shell:
+# - 读命令
+# - 处理 SIGINT（不杀死 shell 自己）
+# - 处理 SIGCHLD（reap 子进程）
+# - 内建命令 (jobs, fg, bg, quit)
+```
+
+让 LLM 写一遍，**你**去解释每一段为什么这样写。
+
+## 你应该能回答的判断题
+
+1. "fork + exec 为什么分开？" 答：fork 复制进程，exec 替换地址空间。分开能实现任意进程模式（后台、shell 管道、守护进程）。
+2. "shell 怎么处理 Ctrl-C？" 答：父进程（shell 自己）忽略 SIGINT，子进程继承这个设置但用 exec 重置为 SIG_DFL。
+4. "waitpid 怎么等子进程结束？" 答：阻塞直到子进程 exit 或被信号中断。`WNOHANG` 让它非阻塞。
+5. "为什么 SIGCHLD 重要？" 答：通知 shell 子进程状态变化，让 shell 回收僵尸进程。
+
+## 经典模式
+
+### 模式一：简单的 eval()
 
 ```c
-int main() {
-    char cmdline[MAXLINE];
-    while (1) {
-        printf("> ");
-        Fgets(cmdline, MAXLINE, stdin);
-        if (feof(stdin)) exit(0);
-
-        eval(cmdline);
-    }
-}
-
 void eval(char *cmdline) {
     char *argv[MAXARGS];
-    int bg = parseline(cmdline, argv);  // 解析命令，bg=1 表示后台
-
+    int bg = parseline(cmdline, argv);
     if (argv[0] == NULL) return;  // 空命令
 
     pid_t pid = Fork();
@@ -38,92 +103,52 @@ void eval(char *cmdline) {
         Execve(argv[0], argv, environ);
     }
 
-    if (!bg) {  // 前台进程，等待
+    if (!bg) {  // 前台：父进程等
         int status;
-        Waitpid(pid, &status, 0);
-    } else {  // 后台进程，不等待
-        printf("%d %s", pid, cmdline);
+        waitpid(pid, &status, 0);
+    } else {
+        printf("%d %s", pid, cmdline);  // 后台
     }
 }
 ```
 
-### 思路
+**核心**：fork + parent + exec + wait。在 bash 里 fork/exec/wait 是异步 shell pipeline 的基础。
 
-1. `parseline`：把用户输入拆分成命令和参数，判断是否后台运行（`&` 结尾）
-2. `Fork`：创建子进程
-3. `Execve`：子进程执行命令
-4. `Waitpid`：前台进程等待子进程结束
-
-这就是 shell 的核心循环。
-
-## 信号处理：Ctrl-C 怎么工作？
-
-用户按 Ctrl-C，内核给前台进程组发 SIGINT。默认行为是终止进程。但 shell 需要特殊处理：
+### 模式二：信号处理
 
 ```c
-// 父进程（shell）忽略 SIGINT
+// shell 本身不应该被 Ctrl-C 杀死
 Signal(SIGINT, SIG_IGN);
-// 子进程继承了这个设置，需要恢复为默认
+
+// 子进程继承这个 SIG_IGN
+// 但 exec 会把 SIG_IGN 重置为 SIG_DFL（默认行为）
+
+// 子进程退出时触发 SIGCHLD
+Signal(SIGCHLD, reap);  // reap 调用 waitpid 回收
 ```
 
-### 思路
+**核心**：信号 handler 是回调地狱——不能在 handler 里调 printf、malloc。
 
-Shell 本身不应该被 Ctrl-C 终止——它应该终止前台子进程，然后继续等待输入。所以 shell 忽略
-SIGINT，让子进程自己处理。
-
-## 作业控制：前后台切换
+### 模式三：作业控制
 
 ```c
-// bg %1：把作业 1 放到后台继续运行
-// fg %1：把作业 1 放到前台
-// jobs：列出所有作业
-
-void builtin_cmd(char **argv) {
-    if (!strcmp(argv[0], "quit")) exit(0);
-    if (!strcmp(argv[0], "jobs")) list_jobs();
-    if (!strcmp(argv[0], "bg")) do_bg(argv);
-    if (!strcmp(argv[0], "fg")) do_fg(argv);
-}
+// bg %1: 把 job 1 送到后台
+// fg %1: 把 job 1 送到前台
+// jobs: 列出所有 job
 ```
 
-### 思路
+shell 维护一个 job list，每个 job 有 pid、status (running/stopped/done)。
 
-Shell 维护一个作业列表，记录每个作业的 PID、状态（运行中/停止/完成）。`SIGCHLD` 信号通知
-shell 子进程状态变化，shell 在信号处理函数中更新作业列表。
+SIGCHLD 通知 shell 子进程状态变化，shell 更新 job list。
 
-## Zig 实现的差异
+**核心**：状态机——每个 job 状态由 SIGCHLD 转换。
 
-```zig
-const posix = std.posix;
+## 本实验 takeaway
 
-fn eval(cmdline: []const u8) void {
-    const argv = parseLine(cmdline);
-    const bg = isBackground(cmdline);
+1. shell 是 fork + exec + wait 的循环——没有魔法
+2. fork 复制进程、exec 替换地址空间，分开是任意进程模式的基础
+3. 信号是异步的——handler 是回调地狱，必须 async-signal-safe
+4. 作业控制是状态机——SIGCHLD 驱动状态转换
+5. AI 帮你写 shell，但你要能解释 fork/exec/wait 的 syscall 序列
 
-    const pid = posix.fork() catch return;
-    if (pid == 0) {
-        // 子进程
-        posix.execveZ(argv[0], argv, environ) catch {
-            std.debug.print("Command not found\n", .{});
-            posix.exit(1);
-        };
-    }
-
-    if (!bg) {
-        _ = posix.waitpid(pid, 0);
-    }
-}
-```
-
-Zig 的 `posix.fork()` 和 `posix.execveZ()` 直接暴露系统调用，没有 C 的 `fork()`/`exec()`
-的包装。你看到的就是你得到的。
-
-## 本实验的 takeaway
-
-1. Shell 的核心是 fork + exec——创建子进程，执行程序
-2. 信号是异步的，信号处理函数需要小心设计
-3. 作业控制维护一个作业列表，用 SIGCHLD 跟踪子进程状态
-4. 理解 shell，你就理解了进程管理、信号、I/O 重定向的全部
-
-**核心 insight：Shell 不是魔法，它就是一个普通的程序，用操作系统提供的
-API（fork、exec、wait、signal）实现了进程管理。**
+**核心 insight：Shell 不是魔法。理解它，你就理解了进程管理、信号、I/O 重定向的全部。**

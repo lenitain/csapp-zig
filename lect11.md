@@ -1,180 +1,117 @@
 # CSAPP 第十一讲：网络编程
 
-## 网络也是文件
+## 物理原理：网络也是文件描述符
 
-Unix 的"一切皆文件"哲学延伸到了网络。网络连接通过**套接字** (socket)
-表示，套接字也是一个文件描述符。你用 `read()`/`write()` 收发数据，就像读写文件一样。
+Unix "一切皆文件"延伸到网络——**socket 也是 fd**。`read`/`write` 收发数据，和读写文件是
+同一套 API。
 
-这是 CSAPP 第十一章的核心
-insight：**网络编程不是什么神秘的东西，它只是 I/O 的一种特殊形式。**
-
-## 客户端-服务器模型
-
-网络应用的基本架构是**客户端-服务器**：
-
-- **服务器**：等待连接，提供服务
-- **客户端**：主动连接服务器，请求服务
-
-```text
-客户端                    服务器
-   |                        |
-   |--- 连接请求 ---------->|
-   |<-- 接受连接 -----------|
-   |--- 发送请求 ---------->|
-   |<-- 返回响应 -----------|
-   |--- 关闭连接 ---------->|
+```
+socket()     → 创建 socket，返回 fd
+bind()       → 绑定本地地址
+listen()     → 服务器监听连接
+accept()     → 服务器接受连接，返回新 fd
+connect()    → 客户端连接服务器
+read/write   → 收发数据
+close()      → 关闭
 ```
 
-## Socket API
+**这件事的物理基础**：网卡是 I/O 设备，OS 用同一个"打开文件表"抽象所有 I/O 源。socket 是
+**文件 + 网络协议栈**的复合。
 
-### 创建套接字
+### 字节序：硬件大小端不统一
+
+网络协议规定**网络字节序是大端** (big-endian)。x86 是小端。ARM 默认小端。
 
 ```c
-int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-// AF_INET: IPv4
-// SOCK_STREAM: TCP（可靠的、面向连接的）
-// 0: 自动选择协议
+addr.sin_port = htons(8080);  // host-to-network-short
 ```
 
-`socket()` 返回一个文件描述符。之后所有的网络操作都通过这个文件描述符进行。
+`htons` 把主机字节序转网络字节序。**这件事是设计协议时决定的**——网络协议选大端作为标准。
 
-### 绑定地址（服务器端）
+## C 的设计选择：sockaddr 强转 + 字节序易忘
 
-```c
-struct sockaddr_in addr;
-addr.sin_family = AF_INET;
-addr.sin_port = htons(8080);           // 端口号
-addr.sin_addr.s_addr = INADDR_ANY;     // 监听所有接口
-
-bind(sockfd, (struct sockaddr *)&addr, sizeof(addr));
-```
-
-`bind()` 把套接字绑定到一个地址和端口。服务器必须绑定，客户端通常不需要（系统自动分配）。
-
-### 监听连接（服务器端）
-
-```c
-listen(sockfd, 10);  // 最多 10 个等待连接
-```
-
-`listen()` 把套接字从"主动"变成"被动"，开始监听连接请求。
-
-### 接受连接（服务器端）
-
-```c
-struct sockaddr_in client_addr;
-socklen_t client_len = sizeof(client_addr);
-int connfd = accept(sockfd, (struct sockaddr *)&client_addr, &client_len);
-```
-
-`accept()`
-从等待队列中取出一个连接，返回一个新的文件描述符。这个新的文件描述符用于和客户端通信。
-
-### 连接服务器（客户端）
+### 类型不安全的 API
 
 ```c
 struct sockaddr_in addr;
 addr.sin_family = AF_INET;
 addr.sin_port = htons(8080);
-inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+addr.sin_addr.s_addr = INADDR_ANY;
 
-connect(sockfd, (struct sockaddr *)&addr, sizeof(addr));
+bind(sockfd, (struct sockaddr *)&addr, sizeof(addr));  // 强转
 ```
 
-`connect()` 主动连接服务器。成功后，套接字就可以收发数据了。
+C 用 `struct sockaddr *` 作为通用类型，实际是 `sockaddr_in` 或 `sockaddr_in6`。**强转绕过了
+类型系统**——传错类型没事，运行时才报。
 
-## 收发数据
-
-连接建立后，用 `read()`/`write()` 收发数据：
+### IPv4/IPv6 两套 API
 
 ```c
-// 客户端发送请求
-write(sockfd, request, strlen(request));
-
-// 服务器接收请求
-char buf[1024];
-ssize_t n = read(connfd, buf, sizeof(buf));
-
-// 服务器发送响应
-write(connfd, response, strlen(response));
+struct sockaddr_in addr4;   // IPv4
+struct sockaddr_in6 addr6; // IPv6
 ```
 
-这就是"一切皆文件"的威力：网络 I/O 和文件 I/O 用同一套 API。
+两套结构、两套函数。**C 的 socket API 是 IPv4 时代发明的，IPv6 补丁上去的**——不是统一
+设计。
 
-## C 的 socket API 的问题
-
-### 类型不安全
+### 阻塞 I/O 是默认
 
 ```c
-struct sockaddr_in addr;
-// 必须强制转换为 struct sockaddr *
-bind(sockfd, (struct sockaddr *)&addr, sizeof(addr));
+int n = read(sockfd, buf, sizeof(buf));  // 没数据时阻塞
 ```
 
-C 的 socket API 用 `struct sockaddr *` 作为通用类型，实际传入的是 `struct sockaddr_in` 或
-`struct sockaddr_in6`。这种强制转换绕过了类型系统。
+socket 默认是阻塞模式。**这是 1972 年 Unix 哲学**——IO 是同步的，OS 调度任务管理代码。
 
-### 大小端转换容易忘
+## 现代视角：类型安全 socket + async
 
-```c
-addr.sin_port = htons(8080); // 主机字节序转网络字节序
+### 类型安全的 socket
+
+```rust
+use tokio::net::TcpListener;
+
+let listener = TcpListener::bind("127.0.0.1:8080").await?;
+loop {
+    let (socket, addr) = listener.accept().await?;
+    tokio::spawn(handle(socket));
+}
 ```
 
-网络协议用大端字节序 (big-endian)，x86 用小端字节序 (little-endian)。你必须用
-`htons()`/`htonl()` 转换。如果忘了，端口号会被错误解释。
+Rust 的 socket API：
 
-### IPv4 和 IPv6 不兼容
+- IPv4/IPv6 统一 `SocketAddr` 枚举
+- 自动字节序转换
+- 编译期类型检查
 
-```c
-// IPv4
-struct sockaddr_in addr4;
-// IPv6
-struct sockaddr_in6 addr6;
-// 两套不同的结构体，不同的函数
+### 非阻塞 I/O 默认
+
+```rust
+// tokio 的 socket 默认非阻塞
+// 事件循环 + epoll/kqueue 调度
 ```
 
-### Zig 的态度：更安全的抽象
+现代 async runtime 把 socket 默认设成非阻塞，事件循环调度。**这是 OS epoll/kqueue 的
+物理能力**——Linux 2.6+、BSD/macOS 都支持。
 
-```zig
-const net = std.net;
+### `BufReader` 适配 socket
 
-// 创建 TCP 服务器
-const address = try net.Address.resolveIp("127.0.0.1", 8080);
-var server = try address.listen(.{
-    .reuse_address = true,
-});
-
-// 接受连接
-const conn = try server.accept();
-const reader = conn.stream.reader();
-const writer = conn.stream.writer();
-
-// 收发数据——和文件 I/O 一样的 API
-const request = try reader.readUntilDelimiterAlloc(allocator, '\n', 1024);
-try writer.print("HTTP/1.1 200 OK\r\n\r\nHello\n", .{});
+```rust
+let mut buf_reader = tokio::io::BufReader::new(socket);
+let mut line = String::new();
+buf_reader.read_line(&mut line).await?;
 ```
 
-Zig 的 `std.net` 提供了类型安全的 socket API：
+显式缓冲，**自动处理短读**。C 的 `read` 短读得自己 while 循环。
 
-- `net.Address` 统一了 IPv4 和 IPv6
-- 字节序转换由库处理
-- 没有强制类型转换
+## HTTP：文本协议
 
-## HTTP：最常用的应用层协议
-
-HTTP (HyperText Transfer Protocol) 是 Web 的基础。它建立在 TCP 之上，使用简单的文本格式：
-
-### HTTP 请求
-
-```text
+```
 GET /index.html HTTP/1.1
 Host: www.example.com
 Connection: close
+
 ```
 
-### HTTP 响应
-
-```text
+```
 HTTP/1.1 200 OK
 Content-Type: text/html
 Content-Length: 13
@@ -182,79 +119,87 @@ Content-Length: 13
 Hello, World!
 ```
 
-HTTP 的设计体现了 Unix 哲学：**简单、文本、可组合。** 你可以用 `telnet` 或 `curl` 手动发送
-HTTP 请求，用 `tcpdump` 抓包查看。
+HTTP 是**文本的**——可以用 `tcpdump` 抓包看，可以用 `curl` 手动发。
 
-### 简单的 HTTP 服务器
+**这是协议设计的取舍**：
 
-```zig
-const std = @import("std");
+- **文本**：人类可读、易调试、容易写 parser（`sscanf` / regex）
+- **二进制**：更紧凑、parse 更快
 
-pub fn main() !void {
-    const address = try std.net.Address.resolveIp("127.0.0.1", 8080);
-    var server = try address.listen(.{ .reuse_address = true });
-    defer server.deinit();
+HTTP 选文本是为了早期 Web 易调试。
 
-    while (true) {
-        const conn = try server.accept();
-        handleConnection(conn);
-    }
-}
+### 简单的 HTTP server (Rust)
 
-fn handleConnection(conn: std.net.Server.Connection) void {
-    defer conn.stream.close();
+```rust
+use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    var buf: [1024]u8 = undefined;
-    const n = conn.stream.reader().read(&buf) catch return;
-    const request = buf[0..n];
-
-    // 解析请求行
-    if (std.mem.startsWith(u8, request, "GET")) {
-        const response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!";
-        _ = conn.stream.writer().write(response) catch return;
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:8080").await?;
+    loop {
+        let (mut socket, _) = listener.accept().await?;
+        tokio::spawn(async move {
+            let mut buf = [0; 1024];
+            socket.read(&mut buf).await.unwrap();
+            let response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!";
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
     }
 }
 ```
 
-这个服务器只有 20 多行代码，但它能处理真实的 HTTP 请求。
+20 多行代码，但能处理真实 HTTP 请求。
 
-## 网络编程的挑战
+## AI 时代怎么验证
 
-### 协议解析
+**1. 让 AI 用 tcpdump 抓 HTTP 流量**
 
-网络数据是字节流，没有"消息边界"。你必须自己解析协议，处理不完整的数据。
-
-```c
-// read() 可能只返回部分数据
-char buf[1024];
-ssize_t n = read(fd, buf, sizeof(buf));
-// buf 里可能只有 HTTP 请求的一部分
-// 你必须循环读取直到收到完整的请求
+```bash
+$ tcpdump -i lo -A port 8080
 ```
 
-### 并发处理
+让 LLM 解释：哪是请求头？哪是响应体？`Content-Length` 为什么是 13？`Connection: close` 什么意思？
 
-服务器需要同时处理多个客户端。选择：
+**2. 让 AI 跑 strace 看 HTTP server 的 syscall**
 
-- 多进程/多线程：每个连接一个进程/线程
-- I/O 多路复用：一个线程处理多个连接
-- 异步 I/O：事件驱动
+```bash
+$ strace -e trace=accept,read,write,clone ./http_server
+```
 
-每种方式都有 trade-off，没有最好的方案。
+让 LLM 解释：accept 返回什么？fork/clone 在哪？为什么 `read` 可能返回短读？
 
-### 错误处理
+**3. 让 AI 对比 epoll vs select vs pthread**
 
-网络是不可靠的。连接可能中断、数据可能丢失、超时可能发生。你必须处理所有这些情况。
+```bash
+# 让 AI 写三个版本的 echo server
+# - select
+# - epoll
+# - pthread (每连接一个线程)
+# 各跑 10000 并发
+```
+
+让 LLM 解释：epoll 为什么 epoll 优于 select？pthread 的栈消耗是多少？fd 限制在哪？
+
+**4. 让 AI 解释字节序**
+
+```python
+import struct
+# 让 AI 解释为什么 8080 在 wire 上是 1F 90
+```
+
+让 LLM 解释：`htons(8080)` 在 x86 上的字节是什么？为什么 x86 和 PowerPC 看到的不一样？
 
 ## 本讲要点
 
-1. 网络套接字是文件描述符，网络 I/O 和文件 I/O 用同一套 API
-2. 客户端-服务器模型是网络应用的基本架构
-3. C 的 socket API 类型不安全，大小端转换容易忘
-4. Zig 的 std.net 提供了更安全的抽象
-5. HTTP 是最常用的应用层协议，设计简单、文本、可组合
+1. socket 是 fd——网络 I/O 和文件 I/O 是同一套 API
+2. 网络字节序是大端，x86 是小端——`htons`/`ntohl` 是必要桥接
+3. C 的 socket API 是 IPv4 时代的——IPv6 补丁、强转、阻塞默认
+4. Rust/tokio 是类型安全 + async + 非阻塞默认——OS epoll/kqueue 的能力
+5. HTTP 是文本协议——可调试但 parse 慢；现代 binary 协议（gRPC/QUIC）换紧凑
+6. AI 时代 tcpdump + strace 是调试网络的必备工具
 
 ## 下一讲
 
-网络让程序可以和远程的程序通信。但本地的程序之间也需要通信——下一讲看并发编程，以及为什么"共享内存"既是并发的基础，也是并发
-bug 的根源。
+网络让程序可以和远程的程序通信。但本地的程序之间也需要通信——下一讲看并发编程，以及为什么
+"共享内存"既是并发的基础，也是并发 bug 的根源。

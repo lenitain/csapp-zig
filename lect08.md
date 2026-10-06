@@ -1,115 +1,52 @@
 # CSAPP 第八讲：异常与进程——操作系统的入口
 
-## 程序不是孤立运行的
+## 物理原理：硬件层面的中断与异常
 
-一个程序独自运行在一台假想的计算机上，那是教科书的理想化模型。现实是：
-
-- 多个程序"同时"运行
-- 程序需要和外部设备交互（磁盘、网络、键盘）
-- 程序会出错（除以零、访问非法内存）
-- 用户需要中断程序（Ctrl-C）
-
-这些需求催生了**异常控制流** (Exceptional Control Flow,
-ECF)——程序的正常执行顺序被打断，跳到操作系统预先安排好的处理代码。
-
-## 异常的分类
-
-CSAPP
-把异常分成四类，但核心思想只有一个：**硬件检测到某个事件，强制跳到操作系统的处理程序。**
+CSAPP 把异常分四类，本质是**硬件检测到事件，强制跳到 OS 的处理代码**：
 
 | 类型 | 原因 | 同步/异步 | 返回行为 |
 |------|------|-----------|----------|
-| 中断 | 外部设备信号 | 异步 | 返回下一条指令 |
-| 陷阱 | 程序主动触发（syscall） | 同步 | 返回下一条指令 |
-| 故障 | 可恢复的错误（缺页） | 同步 | 重试当前指令或终止 |
-| 终止 | 不可恢复的错误 | 同步 | 不返回 |
+| 中断 | 外部设备（网卡、磁盘） | 异步 | 返回下一条指令 |
+| 陷阱 | 程序主动（syscall） | 同步 | 返回下一条指令 |
+| 故障 | 可恢复错误（缺页） | 同步 | 重试或终止 |
+| 终止 | 不可恢复错误 | 同步 | 不返回 |
 
-### 中断
+**关键事实**：硬件中断时，CPU 切换到内核模式，跳到中断描述符表 (IDT) 里的处理程序。
+这件事是**硬件物理实现**——不是 OS 的发明，是 CPU 设计的必然。
 
-硬件设备（定时器、网卡、磁盘控制器）通过中断信号通知 CPU。CPU
-暂停当前程序，跳到中断处理程序，处理完后恢复原程序。
+### 进程是 OS 的运行时抽象
 
-中断是异步的——它和程序的执行无关，随时可能发生。
+进程是"一个正在运行的程序"。每个进程有自己的：
 
-### 陷阱
+- 虚拟地址空间
+- 程序计数器
+- 寄存器状态
+- 文件描述符表
 
-程序主动触发的异常。最常见的是系统调用
-(syscall)：程序需要操作系统帮忙（读文件、创建进程），就执行一条特殊的指令（x86 上是
-`syscall`），CPU 切换到内核模式，跳到系统调用处理程序。
+OS 通过**上下文切换**让多个进程"同时"运行：保存状态、加载另一个、恢复。**这件事本质是
+PCB (Process Control Block) 的保存和加载**——硬件不强制，是 OS 设计的选择。
 
-这就是用户程序和操作系统的边界。你写的 C 代码调用 `read()`，最终会变成一条 `syscall` 指令。
+## C 的设计选择：fork + exec + errno + signal
 
-### 故障
-
-程序执行过程中检测到的错误，但可能可以恢复。最典型的例子是**缺页异常** (page
-fault)：程序访问的虚拟内存页不在物理内存中，CPU
-触发故障，操作系统从磁盘加载这个页，然后重试那条指令。
-
-如果无法恢复（访问了非法地址），故障就变成终止——进程被杀掉，你看到 "Segmentation fault"。
-
-## 进程：程序的运行时实例
-
-进程是操作系统对"一个正在运行的程序"的抽象。每个进程有自己的：
-
-- **虚拟地址空间**：进程以为自己独占全部内存
-- **程序计数器**：下一条要执行的指令
-- **寄存器状态**：当前的变量值
-- **文件描述符表**：打开的文件和网络连接
-
-操作系统通过**上下文切换** (context switch)
-让多个进程"同时"运行：暂停一个进程，保存它的状态，加载另一个进程的状态，恢复执行。切换速度极快（微秒级），用户感觉不到。
-
-## fork：一个天才的设计
+### fork 的天才设计
 
 ```c
 pid_t pid = fork();
 if (pid == 0) {
     // 子进程
-    printf("I'm the child\n");
+    execve(...);
 } else {
     // 父进程
-    printf("I'm the parent, child pid = %d\n", pid);
+    waitpid(pid, ...);
 }
 ```
 
-`fork()` 创建一个新进程，新进程是父进程的**几乎完全的副本**。区别只有一个：`fork()`
-在父进程中返回子进程的 PID，在子进程中返回 0。
+`fork()` 复制当前进程（地址空间、文件描述符……）。`execve()` 用新程序替换地址空间。
 
-为什么是"天才的设计"？因为 fork 把"创建进程"和"执行新程序"分开了：
+为什么是 fork + exec 而不是直接 `create + exec`？因为 fork 把"创建进程"和"执行新程序"分开
+了，能实现任意进程模式（后台、shell 管道、守护进程）。
 
-1. `fork()`：复制当前进程（地址空间、文件描述符……）
-2. `execve()`：用新程序替换当前进程的地址空间
-
-这两个操作的组合可以实现任何进程创建模式：
-
-- 想运行一个新程序？fork + exec
-- 想创建一个后台进程？fork，子进程 exec，父进程继续
-- 想实现 shell 的管道？fork 两次，用 pipe 连接
-
-## 信号：一个设计得很好的糟糕设计
-
-信号 (signal) 是进程间通信的最简单形式：操作系统通知进程"发生了某件事"。
-
-常见信号：
-
-- `SIGINT`：用户按 Ctrl-C
-- `SIGSEGV`：段错误
-- `SIGCHLD`：子进程状态变化
-- `SIGALRM`：定时器到期
-
-信号的"糟糕"之处在于它是**异步的**——信号随时可能到达，打断程序的正常执行。这使得信号处理函数
-(handler) 很难写正确：
-
-- handler 里只能调用"异步信号安全"的函数（不能调用 malloc、printf……）
-- handler 可能和主程序并发执行，需要处理竞态条件
-- 信号可能丢失（标准信号不排队）
-
-但信号的"设计很好"之处在于它的**简单性**：一个整数编号 + 一个 handler
-函数指针。没有复杂的回调注册、没有事件循环、没有消息队列。对于"通知进程发生了某件事"这个需求，信号足够了。
-
-## C 的 errno：一个糟糕的错误处理方式
-
-C 的系统调用和库函数用返回值表示成功/失败，用全局变量 `errno` 表示具体错误。
+### errno：全局错误状态
 
 ```c
 FILE *f = fopen("file.txt", "r");
@@ -118,88 +55,141 @@ if (f == NULL) {
 }
 ```
 
-问题：
+C 用全局 `errno` 表示具体错误。问题：
 
-1. **errno 是全局变量**：在多线程程序里，每个线程需要自己的 errno（现代 C 用
-   `__errno_location()` 实现线程本地 errno，但这是 hack）
-2. **容易忘记检查**：C 不强制检查返回值，你可以忽略错误
-3. **错误信息不丰富**：errno 只是一个整数，没有上下文
+- **全局变量**：多线程里每个线程要自己的 errno（用 `__errno_location()` 实现）
+- **容易忘**：C 不强制检查返回值
+- **不丰富**：errno 是整数，没有上下文
+
+### 信号：异步事件通知
 
 ```c
-// 你可能写的
-close(fd);  // 忽略返回值，如果 close 失败你不知道
+signal(SIGINT, handler);  // Ctrl-C 触发
+signal(SIGCHLD, reap);    // 子进程退出触发
 ```
 
-### Zig 的错误处理：错误是类型系统的一部分
+信号是 OS 给进程的"异步通知"。问题是**异步**——handler 任何时候都可能执行，必须用
+async-signal-safe 函数。**回调地狱的早期形态**。
 
-```zig
-const file = std.fs.cwd().openFile("file.txt", .{}) catch |err| {
-    std.debug.print("错误: {}\n", .{err});
-    return;
-};
-defer file.close();
+```c
+void handler(int sig) {
+    // 不能调用 printf、malloc 等不安全函数
+    write(1, "got signal\n", 11);  // 只能用 write
+}
 ```
 
-Zig 的错误是**类型系统的一部分**。函数返回 `!T` 表示"可能返回 T，也可能返回错误"。你必须用
-`catch` 或 `try` 处理错误，否则编译失败。
+## 现代视角：错误和并发是类型的一部分
 
-```zig
-// 忘记处理错误？编译器告诉你
-const file = std.fs.cwd().openFile("file.txt", .{}); 
-// 编译错误：未处理的错误类型
+### 类型化 Result，错误必须处理
+
+```rust
+fn read_file(path: &str) -> Result<String, io::Error> {
+    let mut file = std::fs::File::open(path)?;  // ? 传播错误
+    let mut s = String::new();
+    file.read_to_string(&mut s)?;
+    Ok(s)
+}
 ```
 
-```zig
-// 用 try 传播错误
-fn readFile() !void {
-    const file = try std.fs.cwd().openFile("file.txt", .{});
-    defer file.close();
+Rust 的 `Result<T, E>` 让错误是**返回值的一部分**。`?` 强制你处理错误——忘处理就编译错误。
+
+C 的 `if (ret < 0) return ret;` 是手动检查。**类型系统强制的事** vs **人脑要记的事**——
+
+### 没有 errno，没有全局状态
+
+Rust/Zig 没有 `errno`。每个 syscall 都返回 `Result<T, Errno>`——错误在返回值里，不在
+全局状态里。多线程不需要 thread-local errno。
+
+### Async runtime 替代信号回调
+
+```rust
+// tokio async runtime
+async fn handle_signal() {
+    tokio::signal::ctrl_c().await.unwrap();
+    println!("got SIGINT");
+}
+```
+
+Rust 的 async runtime 让信号处理是**结构化并发**的一部分——不是信号回调，不是回调地狱。
+OS 信号映射成 future，整个程序是一个状态机。
+
+### defer 替代手动清理
+
+```c
+// C：每个 return 前都要检查
+int foo() {
+    int fd = open(...);
+    if (error1) { close(fd); return -1; }
+    char *buf = malloc(...);
+    if (error2) { free(buf); close(fd); return -1; }
     // ...
 }
 ```
 
-`try` 是 `catch |err| return err` 的语法糖——把错误传播给调用者。这比 C 的
-`if (ret < 0) return ret;` 模式清晰得多。
-
-## Zig 对系统调用的态度
-
-Zig 的 `std.posix` 层直接暴露 POSIX 接口，没有 C 标准库的抽象层：
-
-```zig
-const posix = std.posix;
-
-// fork 就是 fork
-const pid = try posix.fork();
-if (pid == 0) {
-    // 子进程
-} else {
-    // 父进程
+```rust
+// Rust：defer 1 行搞定
+fn foo() -> Result<(), Error> {
+    let fd = open(...)?;
+    let buf = vec![0u8; 1024];  // Vec 实现 Drop，离开作用域自动释放
+    // ...
+    Ok(())
 }
 ```
 
-你看到 `posix.fork()`，就知道它背后是 `fork()` 系统调用。没有 `popen()` 或 `system()`
-那种隐藏了 fork+exec 的包装。
+`defer` 让资源清理**作用域绑定**。C 的每个 return 路径都要手动清理是**原理缺陷**。
 
-## 为什么要理解这些？
+## AI 时代怎么验证
 
-在 AI 时代，你不需要手写 fork/exec 的代码。但你需要理解：
+**1. 让 AI strace 一个 shell**
 
-- **进程隔离**：为什么一个进程崩溃不会影响其他进程
-- **权限边界**：为什么普通用户不能读 /etc/shadow
-- **容器和虚拟机**：它们是进程抽象的进一步延伸
-- **调试器的工作原理**：ptrace 系统调用让调试器能控制目标进程的执行
+```bash
+$ strace -f -e trace=clone,execve,wait4 bash -c "ls /tmp"
+```
 
-这些知识不会过时，因为它们是操作系统设计的基石。
+让 LLM 解释：哪些 `clone` 创建子进程？哪些 `execve` 替换程序？哪些 `wait4` 等待？
+
+**2. 让 AI 跑 SIGCHLD 追踪**
+
+```c
+// 写一个 parent fork child，然后让 AI strace
+```
+
+让 LLM 看 SIGCHLD 在什么时候触发，handler 的执行顺序。
+
+**3. 让 AI 解释 fork + copy-on-write**
+
+```bash
+$ strace -e trace=clone,mmap bash -c "ls /tmp"
+```
+
+让 LLM 解释：fork 后父子进程地址空间怎么共享？copy-on-write 在哪一刻发生？
+
+**4. 让 AI 验证 errno vs Result**
+
+```c
+// 写一个 C 程序，不检查 fopen 返回值，让 AI 跑 sanitizer
+```
+
+让 LLM 找未检查的返回值。重点：每个 libc 调用都可能失败——这是 C 抽象机制的问题。
+
+**5. 让 AI 对比 async runtime 和 pthread**
+
+```bash
+$ time ./pthread_program  // 10000 连接，每连接一个线程
+$ time ./async_program    // tokio async
+```
+
+让 LLM 解释：为什么 async 程序内存占用低？状态机怎么建？callback hell 是怎么解决的？
 
 ## 本讲要点
 
-1. 异常控制流是操作系统管理程序执行的核心机制
-2. 进程有独立的虚拟地址空间，通过上下文切换"同时"运行
-3. fork 的天才设计：复制 + 替换 = 任意进程创建模式
-4. 信号是简单但危险的异步通知机制
-5. C 的 errno 是全局变量，容易忘记检查；Zig 的错误是类型系统的一部分，不处理就编译失败
-6. 理解这些是理解容器、虚拟机、调试器的基础
+1. 异常/陷阱/中断是硬件层面的事件分发——CPU 切到内核态跳 IDT
+2. 进程 = PCB 抽象，OS 通过上下文切换实现"同时"运行
+3. fork+exec 是 Unix 天才设计，errno 是全局错误的妥协
+4. 信号回调地狱是异步编程的早期形态——async runtime 解决了它
+5. Result 类型让错误处理编译期可见——C 的 errno 是历史遗留
 
 ## 下一讲
 
-进程有自己的虚拟地址空间，但这个"虚拟"到底是怎么回事？下一讲看虚拟内存——操作系统如何用有限的物理内存骗过每个进程，让它们以为自己独占全部内存。
+进程有自己的虚拟地址空间，但这个"虚拟"到底是怎么回事？下一讲看虚拟内存——操作系统如何用有限
+的物理内存骗过每个进程，让它们以为自己独占全部内存。
